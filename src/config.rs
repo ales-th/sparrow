@@ -24,7 +24,9 @@ pub struct SparrowConfig {
 }
 
 impl Default for SparrowConfig {
-    fn default() -> Self { DEFAULT_SPARROW_CONFIG }
+    fn default() -> Self {
+        DEFAULT_SPARROW_CONFIG
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -35,7 +37,7 @@ pub struct ExplorationConfig {
     pub max_conseq_failed_attempts: Option<usize>,
     pub solution_pool_distribution_stddev: f32,
     pub separator_config: SeparatorConfig,
-    pub large_item_ch_area_cutoff_percentile: f32
+    pub large_item_ch_area_cutoff_percentile: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -73,7 +75,7 @@ pub const DEFAULT_SPARROW_CONFIG: SparrowConfig = SparrowConfig {
                 n_coord_descents: 3,
             },
         },
-        large_item_ch_area_cutoff_percentile: 0.75
+        large_item_ch_area_cutoff_percentile: 0.75,
     },
     cmpr_cfg: CompressionConfig {
         shrink_range: (0.0005, 0.00001),

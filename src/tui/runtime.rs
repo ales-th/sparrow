@@ -150,10 +150,7 @@ fn run_dashboard(
     }
 }
 
-fn export_final_solution(
-    solution: &SPSolution,
-    ext_instance: &ExtSPInstance,
-) -> Result<()> {
+fn export_final_solution(solution: &SPSolution, ext_instance: &ExtSPInstance) -> Result<()> {
     let svg_path = format!("{OUTPUT_DIR}/final_{}.svg", ext_instance.name);
     io::write_svg(
         &s_layout_to_svg(solution.layout_snapshot(), 0, DRAW_OPTIONS, "final"),
@@ -248,9 +245,11 @@ impl Terminator for TuiTerminator {
     fn stop_signal(&self) -> Option<sparrow::util::terminator::StopSignal> {
         let signals = self.signals.clone();
         let timeout = self.timeout;
-        Some(Arc::new(move || signals.quit.load(Ordering::Relaxed)
-            || signals.interrupt_phase.load(Ordering::Relaxed)
-            || timeout.is_some_and(|t| CdeInstant::now() >= t)))
+        Some(Arc::new(move || {
+            signals.quit.load(Ordering::Relaxed)
+                || signals.interrupt_phase.load(Ordering::Relaxed)
+                || timeout.is_some_and(|t| CdeInstant::now() >= t)
+        }))
     }
 
     fn kill(&self) -> bool {

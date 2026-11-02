@@ -13,19 +13,21 @@ use jagua_rs::Instant;
 use numfmt::{Formatter, Precision, Scales};
 use std::sync::LazyLock;
 
+pub mod config;
+pub mod consts;
+pub mod eval;
 pub mod optimizer;
 pub mod quantify;
 pub mod sample;
-pub mod util;
-pub mod config;
-pub mod eval;
-pub mod consts;
 pub mod solver;
+pub mod util;
 
-pub use jagua_rs;
 pub use config::SparrowConfig;
-pub use solver::{solve, BudgetMode, CompletionReason, ProgressEvent, SolveControl, SolveError,
-    SolveOutcome, SolvePhase, SolveProblem, SolveSettings, SolveStatistics, SolveStatus};
+pub use jagua_rs;
+pub use solver::{
+    BudgetMode, CompletionReason, ProgressEvent, SolveControl, SolveError, SolveOutcome,
+    SolvePhase, SolveProblem, SolveSettings, SolveStatistics, SolveStatus, solve,
+};
 
 pub static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
@@ -34,7 +36,6 @@ static FMT: fn() -> Formatter = || -> Formatter {
         .scales(Scales::short())
         .precision(Precision::Significance(3))
 };
-
 
 #[cfg(feature = "live_svg")]
 pub const EXPORT_LIVE_SVG: bool = true;

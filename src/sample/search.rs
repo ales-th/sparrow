@@ -1,11 +1,14 @@
-use crate::consts::{PRE_REFINE_CD_R_STEPS, PRE_REFINE_CD_TL_RATIOS, SND_REFINE_CD_R_STEPS, SND_REFINE_CD_TL_RATIOS, UNIQUE_SAMPLE_THRESHOLD};
+use crate::consts::{
+    PRE_REFINE_CD_R_STEPS, PRE_REFINE_CD_TL_RATIOS, SND_REFINE_CD_R_STEPS, SND_REFINE_CD_TL_RATIOS,
+    UNIQUE_SAMPLE_THRESHOLD,
+};
 use crate::eval::sample_eval::{SampleEval, SampleEvaluator};
 use crate::sample::best_samples::BestSamples;
-use crate::sample::coord_descent::{refine_coord_desc_with_stop, CDConfig};
+use crate::sample::coord_descent::{CDConfig, refine_coord_desc_with_stop};
 use crate::sample::uniform_sampler::UniformBBoxSampler;
 use jagua_rs::entities::{Item, Layout, PItemKey};
-use jagua_rs::geometry::geo_enums::RotationRange;
 use jagua_rs::geometry::DTransformation;
+use jagua_rs::geometry::geo_enums::RotationRange;
 use log::debug;
 use rand::Rng;
 
@@ -17,14 +20,35 @@ pub struct SampleConfig {
 }
 
 /// Algorithm 6 and Figure 7 from https://doi.org/10.48550/arXiv.2509.13329
-pub fn search_placement(l: &Layout, item: &Item, ref_pk: Option<PItemKey>, evaluator: impl SampleEvaluator, sample_config: SampleConfig, rng: &mut impl Rng) -> (Option<(DTransformation, SampleEval)>, usize) {
+pub fn search_placement(
+    l: &Layout,
+    item: &Item,
+    ref_pk: Option<PItemKey>,
+    evaluator: impl SampleEvaluator,
+    sample_config: SampleConfig,
+    rng: &mut impl Rng,
+) -> (Option<(DTransformation, SampleEval)>, usize) {
     search_placement_with_stop(l, item, ref_pk, evaluator, sample_config, rng, &|| false)
 }
 
-pub(crate) fn search_placement_with_stop(l: &Layout, item: &Item, ref_pk: Option<PItemKey>, mut evaluator: impl SampleEvaluator, sample_config: SampleConfig, rng: &mut impl Rng, stopped: &impl Fn() -> bool) -> (Option<(DTransformation, SampleEval)>, usize) {
-    let item_min_dim = f32::min(item.shape_cd().bbox().width(), item.shape_cd().bbox().height());
+pub(crate) fn search_placement_with_stop(
+    l: &Layout,
+    item: &Item,
+    ref_pk: Option<PItemKey>,
+    mut evaluator: impl SampleEvaluator,
+    sample_config: SampleConfig,
+    rng: &mut impl Rng,
+    stopped: &impl Fn() -> bool,
+) -> (Option<(DTransformation, SampleEval)>, usize) {
+    let item_min_dim = f32::min(
+        item.shape_cd().bbox().width(),
+        item.shape_cd().bbox().height(),
+    );
 
-    let mut best_samples = BestSamples::new(sample_config.n_coord_descents, item_min_dim * UNIQUE_SAMPLE_THRESHOLD);
+    let mut best_samples = BestSamples::new(
+        sample_config.n_coord_descents,
+        item_min_dim * UNIQUE_SAMPLE_THRESHOLD,
+    );
 
     //Create the two uniform samplers, one focussed around the reference placement, one for the whole container
     let focussed_sampler = match ref_pk {
@@ -42,12 +66,18 @@ pub(crate) fn search_placement_with_stop(l: &Layout, item: &Item, ref_pk: Option
         }
         None => None,
     };
-    let container_sampler = UniformBBoxSampler::new(l.container().outer_cd().bbox(), item, l.container().outer_cd().bbox());
+    let container_sampler = UniformBBoxSampler::new(
+        l.container().outer_cd().bbox(),
+        item,
+        l.container().outer_cd().bbox(),
+    );
 
     //Perform the focussed sampling
     if let Some(focussed_sampler) = focussed_sampler {
         for _ in 0..sample_config.n_focussed_samples {
-            if stopped() { break; }
+            if stopped() {
+                break;
+            }
             let dt = focussed_sampler.sample(rng);
             let eval = evaluator.evaluate_sample(dt, Some(best_samples.upper_bound()));
             best_samples.report(dt, eval);
@@ -57,7 +87,9 @@ pub(crate) fn search_placement_with_stop(l: &Layout, item: &Item, ref_pk: Option
     //Perform the container-wide sampling
     if let Some(container_sampler) = container_sampler {
         for _ in 0..sample_config.n_container_samples {
-            if stopped() { break; }
+            if stopped() {
+                break;
+            }
             let dt = container_sampler.sample(rng);
             let eval = evaluator.evaluate_sample(dt, Some(best_samples.upper_bound()));
             best_samples.report(dt, eval);
@@ -68,23 +100,43 @@ pub(crate) fn search_placement_with_stop(l: &Layout, item: &Item, ref_pk: Option
 
     //1. Do a first refinement of all 'best samples' using coordinate descent
     for start in best_samples.samples.clone() {
-        if stopped() { break; }
-        let descended = refine_coord_desc_with_stop(start, &mut evaluator, prerefine_cd_config(item), rng, stopped);
+        if stopped() {
+            break;
+        }
+        let descended = refine_coord_desc_with_stop(
+            start,
+            &mut evaluator,
+            prerefine_cd_config(item),
+            rng,
+            stopped,
+        );
         best_samples.report(descended.0, descended.1);
     }
 
-
     //2. Take the best one and do an even finer coordinate descent refinement
-    let final_sample = best_samples.best().map(|s|
-        refine_coord_desc_with_stop(s, &mut evaluator, final_refine_cd_config(item), rng, stopped)
-    );
+    let final_sample = best_samples.best().map(|s| {
+        refine_coord_desc_with_stop(
+            s,
+            &mut evaluator,
+            final_refine_cd_config(item),
+            rng,
+            stopped,
+        )
+    });
 
-    debug!("[S] {} samples evaluated, final: {:?}",evaluator.n_evals(),final_sample);
+    debug!(
+        "[S] {} samples evaluated, final: {:?}",
+        evaluator.n_evals(),
+        final_sample
+    );
     (final_sample, evaluator.n_evals())
 }
 
 fn prerefine_cd_config(item: &Item) -> CDConfig {
-    let item_min_dim = f32::min(item.shape_cd().bbox().width(), item.shape_cd().bbox().height());
+    let item_min_dim = f32::min(
+        item.shape_cd().bbox().width(),
+        item.shape_cd().bbox().height(),
+    );
     let wiggle = item.allowed_orientations().rotations() == &RotationRange::Continuous;
     CDConfig {
         t_step_init: item_min_dim * PRE_REFINE_CD_TL_RATIOS.0,
@@ -96,14 +148,17 @@ fn prerefine_cd_config(item: &Item) -> CDConfig {
 }
 
 fn final_refine_cd_config(item: &Item) -> CDConfig {
-    let item_min_dim = f32::min(item.shape_cd().bbox().width(), item.shape_cd().bbox().height());
+    let item_min_dim = f32::min(
+        item.shape_cd().bbox().width(),
+        item.shape_cd().bbox().height(),
+    );
     let wiggle = item.allowed_orientations().rotations() == &RotationRange::Continuous;
     CDConfig {
         t_step_init: item_min_dim * SND_REFINE_CD_TL_RATIOS.0,
         t_step_limit: item_min_dim * SND_REFINE_CD_TL_RATIOS.1,
         r_step_init: SND_REFINE_CD_R_STEPS.0,
         r_step_limit: SND_REFINE_CD_R_STEPS.1,
-        wiggle
+        wiggle,
     }
 }
 
@@ -117,7 +172,9 @@ mod cancellation_tests {
             self.0.set(self.0.get() + 1);
             SampleEval::Clear { loss: 0.0 }
         }
-        fn n_evals(&self) -> usize { self.0.get() }
+        fn n_evals(&self) -> usize {
+            self.0.get()
+        }
     }
     #[test]
     fn sampling_checks_stop_before_the_next_sample_and_refinement() {
@@ -131,9 +188,19 @@ mod cancellation_tests {
         let mut prob = jagua_rs::probs::spp::entities::SPProblem::new(instance).unwrap();
         prob.change_strip_width(100.0).unwrap();
         let count = Rc::new(Cell::new(0));
-        let (_, evaluated) = search_placement_with_stop(prob.layout(), prob.instance().item(0), None,
-            CountingEvaluator(count.clone()), SampleConfig { n_container_samples: 10000, n_focussed_samples: 0, n_coord_descents: 3 },
-            &mut rand::rng(), &|| count.get() >= 1);
+        let (_, evaluated) = search_placement_with_stop(
+            prob.layout(),
+            prob.instance().item(0),
+            None,
+            CountingEvaluator(count.clone()),
+            SampleConfig {
+                n_container_samples: 10000,
+                n_focussed_samples: 0,
+                n_coord_descents: 3,
+            },
+            &mut rand::rng(),
+            &|| count.get() >= 1,
+        );
         assert_eq!(evaluated, 1);
     }
 }
