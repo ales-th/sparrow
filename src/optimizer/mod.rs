@@ -21,63 +21,99 @@ mod worker;
 pub mod explore;
 pub mod compress;
 
+/// Low-level compatibility entry point. Prefer [`crate::solve`] for new application code.
+///
+/// Callers own import/configuration validation, RNG, listener and terminator setup.
+/// This returns an error instead of an outcome retaining the best solution on failure,
+/// and uses phase/search-only budgets. See [`crate::solver`] for the application contract.
+///
 /// Algorithm 11 from https://doi.org/10.48550/arXiv.2509.13329
 ///
 /// Returns a construction error if no initial solution is supplied and the
 /// initial-placement heuristic cannot build one within its strip growth limit.
 pub fn optimize(
     instance: SPInstance,
-    mut rng: Xoshiro256PlusPlus,
+    rng: Xoshiro256PlusPlus,
     sol_listener: &mut impl SolutionListener,
     terminator: &mut impl Terminator,
     expl_config: &ExplorationConfig,
     cmpr_config: &CompressionConfig,
     initial_solution: Option<&SPSolution>
 ) -> anyhow::Result<SPSolution> {
+    optimize_with(instance, rng, sol_listener, terminator, expl_config, cmpr_config, initial_solution)
+        .map_err(|error| match error {
+            crate::solver::SolveError::InvalidSettings(message) => anyhow::anyhow!(message),
+            crate::solver::SolveError::Input(source)
+            | crate::solver::SolveError::WarmStart(source)
+            | crate::solver::SolveError::Construction(source)
+            | crate::solver::SolveError::RuntimeSetup(source) => source,
+        })?
+        .ok_or_else(|| anyhow::anyhow!("optimization stopped before initial placement completed"))
+}
+
+/// Shared orchestration for legacy callers and the embedding facade.
+pub(crate) fn optimize_with(
+    instance: SPInstance,
+    mut rng: Xoshiro256PlusPlus,
+    sol_listener: &mut impl SolutionListener,
+    terminator: &mut impl Terminator,
+    expl_config: &ExplorationConfig,
+    cmpr_config: &CompressionConfig,
+    initial_solution: Option<&SPSolution>,
+) -> Result<Option<SPSolution>, crate::solver::SolveError> {
+    use crate::solver::SolveError;
     let mut next_rng = || Xoshiro256PlusPlus::seed_from_u64(rng.next_u64());
-    
-    // First build an initial solution if none is provided
     let start_prob = match initial_solution {
         None => {
-            let builder = LBFBuilder::new(instance, next_rng(), LBF_SAMPLE_CONFIG)?.construct()?;
-            builder.prob
+            if terminator.run_stopped() { return Ok(None); }
+            let builder = LBFBuilder::new(instance, next_rng(), LBF_SAMPLE_CONFIG)
+                .map_err(SolveError::Construction)?
+                .construct_with(terminator, sol_listener).map_err(SolveError::Construction)?;
+            match builder { Some(builder) => builder.prob, None => return Ok(None) }
         }
-        Some(init_sol) => {
-            info!("[OPT] warm starting from provided initial solution");
-            let mut prob = jagua_rs::probs::spp::entities::SPProblem::new(instance)?;
-            prob.restore(init_sol);
+        Some(initial) => {
+            let initial = crate::solver::validate_initial(&instance, initial).map_err(SolveError::WarmStart)?;
+            let mut prob = SPProblem::new(instance).map_err(SolveError::Construction)?;
+            prob.restore(&initial);
             prob
         }
     };
+    let initial = start_prob.save();
+    sol_listener.report_initial_solution(&initial);
+    if terminator.run_stopped() {
+        sol_listener.report(ReportType::Final, &initial);
+        return Ok(Some(initial));
+    }
 
-    // Begin by executing the exploration phase
     sol_listener.report_phase(OptimizationPhase::Exploration);
+    if terminator.run_stopped() {
+        sol_listener.report(ReportType::Final, &initial);
+        return Ok(Some(initial));
+    }
     terminator.new_timeout(expl_config.time_limit);
-    let mut expl_separator = Separator::new(start_prob, next_rng(), expl_config.separator_config);
-    let solutions = exploration_phase(
-        &mut expl_separator,
-        sol_listener,
-        terminator,
-        expl_config,
-    );
-    let final_explore_sol = solutions.into_iter().last().unwrap();
+    let mut expl_separator = Separator::try_new(start_prob, next_rng(), expl_config.separator_config)
+        .map_err(SolveError::RuntimeSetup)?;
+    let solutions = exploration_phase(&mut expl_separator, sol_listener, terminator, expl_config);
+    let final_explore_sol = solutions.into_iter().last().expect("initial solution is always retained");
+    if terminator.run_stopped() {
+        sol_listener.report(ReportType::Final, &final_explore_sol);
+        return Ok(Some(final_explore_sol));
+    }
 
-    // Start the compression phase from the final solution from the exploration phase
     sol_listener.report_phase(OptimizationPhase::Compression);
+    if terminator.run_stopped() {
+        sol_listener.report(ReportType::Final, &final_explore_sol);
+        return Ok(Some(final_explore_sol));
+    }
     terminator.new_timeout(cmpr_config.time_limit);
-    let mut cmpr_separator = Separator::new(expl_separator.prob, next_rng(), cmpr_config.separator_config);
-    let cmpr_sol = compression_phase(
-        &mut cmpr_separator,
-        &final_explore_sol,
-        sol_listener,
-        terminator,
-        cmpr_config,
-    );
-
-    sol_listener.report(ReportType::Final, &cmpr_sol);
-
-    // Return the final compressed solution
-    Ok(cmpr_sol)
+    let mut config = *cmpr_config;
+    // Time-based compression must use its effective allocation in whole-run mode.
+    config.time_limit = terminator.phase_time_limit(cmpr_config.time_limit);
+    let mut cmpr_separator = Separator::try_new(expl_separator.prob, next_rng(), config.separator_config)
+        .map_err(SolveError::RuntimeSetup)?;
+    let solution = compression_phase(&mut cmpr_separator, &final_explore_sol, sol_listener, terminator, &config);
+    sol_listener.report(ReportType::Final, &solution);
+    Ok(Some(solution))
 }
 
 /// Conservative lower bound on strip width, including the container's inset.

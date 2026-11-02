@@ -6,6 +6,7 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SparrowConfig {
+    /// Legacy platform-sized seed. Prefer `SolveSettings::seed` for a full u64 seed.
     pub rng_seed: Option<usize>,
     pub expl_cfg: ExplorationConfig,
     pub cmpr_cfg: CompressionConfig,
@@ -22,9 +23,14 @@ pub struct SparrowConfig {
     pub narrow_concavity_cutoff_ratio: Option<(f32, f32)>,
 }
 
+impl Default for SparrowConfig {
+    fn default() -> Self { DEFAULT_SPARROW_CONFIG }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ExplorationConfig {
     pub shrink_step: f32,
+    /// Phase budget for search-only callers; whole-run solve settings choose their own allocation.
     pub time_limit: Duration,
     pub max_conseq_failed_attempts: Option<usize>,
     pub solution_pool_distribution_stddev: f32,
@@ -35,6 +41,7 @@ pub struct ExplorationConfig {
 #[derive(Debug, Clone, Copy)]
 pub struct CompressionConfig {
     pub shrink_range: (f32, f32),
+    /// Phase budget for search-only callers; whole-run solve settings choose their own allocation.
     pub time_limit: Duration,
     pub shrink_decay: ShrinkDecayStrategy,
     pub separator_config: SeparatorConfig,

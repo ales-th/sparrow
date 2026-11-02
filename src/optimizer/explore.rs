@@ -61,7 +61,9 @@ pub fn exploration_phase(sep: &mut Separator, sol_listener: &mut impl SolutionLi
             infeas_sol_pool.clear();
         } else {
             info!("[EXPL] unable to reach feasibility (width: {:.3}, dens: {:.3}%, min loss: {})", current_width, sep.prob.density() * 100.0, FMT().fmt2(total_loss));
-            sol_listener.report(ReportType::ExplInfeas, &local_best.0);
+            if sol_listener.wants_candidates() {
+                sol_listener.report(ReportType::ExplInfeas, &local_best.0);
+            }
 
             // Separation was not successful add it to the pool of infeasible solutions
             match infeas_sol_pool.binary_search_by(|(_, o)| o.partial_cmp(&total_loss).unwrap()) {

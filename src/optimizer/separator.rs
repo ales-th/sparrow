@@ -18,6 +18,11 @@ use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
 use rayon::ThreadPool;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_NEXT_SETUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SeparatorConfig {
     pub iter_no_imprv_limit: usize,
@@ -38,7 +43,22 @@ pub struct Separator {
 }
 
 impl Separator {
-    pub fn new(prob: SPProblem, mut rng: Xoshiro256PlusPlus, config: SeparatorConfig) -> Self {
+    pub fn new(prob: SPProblem, rng: Xoshiro256PlusPlus, config: SeparatorConfig) -> Self {
+        Self::try_new(prob, rng, config).expect("failed to initialize separator")
+    }
+
+    /// Fallible counterpart of [`Self::new`], including local worker-pool setup.
+    pub fn try_new(prob: SPProblem, mut rng: Xoshiro256PlusPlus, config: SeparatorConfig) -> anyhow::Result<Self> {
+        #[cfg(test)]
+        anyhow::ensure!(!FAIL_NEXT_SETUP.with(|fail| fail.replace(false)), "injected worker-pool setup failure");
+        anyhow::ensure!(config.n_workers > 0 && config.n_workers <= rayon::max_num_threads(), "worker count must be within Rayon's supported range");
+        let pool = if cfg!(target_arch = "wasm32") {
+            // On wasm32, only the global thread pool is available
+            None
+        } else {
+            // Create a local thread pool to keep using the same threads for the same optimization (helps the OS scheduler)
+            Some(rayon::ThreadPoolBuilder::new().num_threads(config.n_workers).build()?)
+        };
         let ct = CollisionTracker::new(prob.layout());
         let workers = (0..config.n_workers).map(|_|
             SeparatorWorker {
@@ -48,15 +68,7 @@ impl Separator {
                 sample_config: config.sample_config,
             }).collect();
 
-        let pool = if cfg!(target_arch = "wasm32") {
-            // On wasm32, only the global thread pool is available
-            None
-        } else {
-            // Create a local thread pool to keep using the same threads for the same optimization (helps the OS scheduler)
-            Some(rayon::ThreadPoolBuilder::new().num_threads(config.n_workers).build().unwrap())
-        };
-
-        Self {
+        Ok(Self {
             prob,
             rng,
             ct,
@@ -64,7 +76,7 @@ impl Separator {
             workers,
             config,
             thread_pool: pool,
-        }
+        })
     }
 
     /// Algorithm 9 from https://doi.org/10.48550/arXiv.2509.13329
@@ -89,9 +101,9 @@ impl Separator {
             let initial_strike_loss = self.ct.get_total_loss();
             debug!("[SEP] [s:{n_strikes},i:{n_iter}]     init_l: {}",FMT().fmt2(initial_strike_loss));
 
-            while n_iter_no_improvement < self.config.iter_no_imprv_limit {
+            while n_iter_no_improvement < self.config.iter_no_imprv_limit && !term.kill() {
                 let (loss_before, w_loss_before) = (self.ct.get_total_loss(), self.ct.get_total_weighted_loss(),);
-                sep_stats += self.move_items_multi();
+                sep_stats += self.move_items_multi_with_stop(term.stop_signal());
                 let (loss, w_loss) = (self.ct.get_total_loss(), self.ct.get_total_weighted_loss(),);
 
                 debug!("[SEP] [s:{n_strikes},i:{n_iter}] ( ) l: {} -> {}, wl: {} -> {}, (min l: {})", FMT().fmt2(loss_before), FMT().fmt2(loss), FMT().fmt2(w_loss_before), FMT().fmt2(w_loss), FMT().fmt2(min_loss));
@@ -106,7 +118,9 @@ impl Separator {
                 } else if loss < min_loss {
                     //Not all collisions are resolved, but we found a new 'best' solution
                     log!(self.config.log_level,"[SEP] [s:{n_strikes},i:{n_iter}] (*) min_l: {}",FMT().fmt2(loss));
-                    sol_listener.report(ReportType::ExplImproving, &self.prob.save());
+                    if sol_listener.wants_candidates() {
+                        sol_listener.report(ReportType::ExplImproving, &self.prob.save());
+                    }
                     if loss < min_loss * 0.98 {
                         //Reset the `iter_no_improvement` counter if the best solution is a substantial improvement
                         n_iter_no_improvement = 0;
@@ -156,7 +170,7 @@ impl Separator {
     }
 
     /// Algorithm 10 from https://doi.org/10.48550/arXiv.2509.13329
-    fn move_items_multi(&mut self) -> SepStats {
+    fn move_items_multi_with_stop(&mut self, stop: Option<crate::util::terminator::StopSignal>) -> SepStats {
         let master_sol = self.prob.save();
 
         // Define the parallel execution closure
@@ -165,7 +179,7 @@ impl Separator {
                 // Sync the workers with the master
                 worker.load(&master_sol, &self.ct);
                 // Let all of them run `move_items` with unique random orderings in which the items are moved
-                worker.move_items()
+                worker.move_items_with_stop(&|| stop.as_ref().is_some_and(|check| check()))
             }).sum()
         };
 
@@ -272,5 +286,35 @@ impl Separator {
         });
         debug!("[SEP] changed strip width to {:.3}", new_width);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use jagua_rs::probs::spp::entities::SPPlacement;
+    #[test]
+    fn parallel_workers_stop_without_corrupting_layout_or_tracker() {
+        let external = serde_json::from_value(serde_json::json!({"name":"workers", "strip_height":10,
+            "items":[{"id":1,"demand":2,"orientation":{"rotation":{"mode":"discrete","angles":[0]}},
+            "shape":{"type":"simple_polygon","data":[[0,0],[2,0],[2,2],[0,2]]}}]
+        })).unwrap();
+        let config = crate::config::DEFAULT_SPARROW_CONFIG;
+        let importer = jagua_rs::io::import::Importer::new(config.cde_config, None, None);
+        let instance = jagua_rs::probs::spp::io::import_instance(&importer, &external).unwrap();
+        let mut prob = SPProblem::new(instance).unwrap();
+        prob.change_strip_width(100.0).unwrap();
+        for _ in 0..2 {
+            prob.place_item(SPPlacement { item_idx: 0, d_transf: DTransformation::new(0.0, (5.0,5.0)) });
+        }
+        let mut config = config.expl_cfg.separator_config; config.n_workers = 2;
+        let mut separator = Separator::try_new(prob, Xoshiro256PlusPlus::seed_from_u64(0), config).unwrap();
+        let before = separator.ct.get_total_loss();
+        assert!(before > 0.0);
+        let stats = separator.move_items_multi_with_stop(Some(std::sync::Arc::new(|| true)));
+        assert_eq!(stats.total_moves, 0);
+        assert_eq!(stats.total_evals, 0);
+        assert_eq!(separator.ct.get_total_loss(), before);
+        assert!(tracker_matches_layout(&separator.ct, separator.prob.layout()));
     }
 }

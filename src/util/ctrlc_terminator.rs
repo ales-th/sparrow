@@ -36,6 +36,12 @@ impl CtrlCTerminator {
 }
 
 impl Terminator for CtrlCTerminator {
+    fn stop_signal(&self) -> Option<crate::util::terminator::StopSignal> {
+        let timeout = self.timeout;
+        let ctrlc = self.ctrlc.clone();
+        Some(Arc::new(move || ctrlc.load(Ordering::SeqCst) || timeout.is_some_and(|t| Instant::now() >= t)))
+    }
+
     fn kill(&self) -> bool {
         self.timeout.is_some_and(|timeout| Instant::now() > timeout)
             || self.ctrlc.load(Ordering::SeqCst)

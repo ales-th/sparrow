@@ -32,6 +32,10 @@ impl SeparatorWorker {
 
     /// Algorithm 5 from https://doi.org/10.48550/arXiv.2509.13329
     pub fn move_items(&mut self) -> SepStats {
+        self.move_items_with_stop(&|| false)
+    }
+
+    pub(crate) fn move_items_with_stop(&mut self, stopped: &impl Fn() -> bool) -> SepStats {
         // Collect all colliding items in a random order
         let candidates = self.prob.layout().placed_items().keys()
             .filter(|pk| self.ct.get_loss(*pk) > 0.0)
@@ -43,6 +47,7 @@ impl SeparatorWorker {
 
         // Give each colliding item the opportunity to move to a better (eval) position
         for &pk in candidates.iter() {
+            if stopped() { break; }
             // First check if the item is still colliding
             if self.ct.get_loss(pk) > 0.0 {
                 let item = self.prob.layout().placed_items()[pk].item();
@@ -52,7 +57,7 @@ impl SeparatorWorker {
 
                 // Perform the search for a better position for the item
                 let (best_sample, n_evals) =
-                    search::search_placement(self.prob.layout(), item, Some(pk), evaluator, self.sample_config, &mut self.rng);
+                    search::search_placement_with_stop(self.prob.layout(), item, Some(pk), evaluator, self.sample_config, &mut self.rng, stopped);
 
                 let (new_dt, _eval) = best_sample.expect("search_placement should always return a sample");
 

@@ -21,11 +21,12 @@ pub struct CDConfig {
 }
 
 /// Refines an initial 'sample' (transformation and evaluation) into a local minimum using a coordinate descent inspired algorithm.
-pub fn refine_coord_desc(
+pub(crate) fn refine_coord_desc_with_stop(
     (init_dt, init_eval): (DTransformation, SampleEval),
     evaluator: &mut impl SampleEvaluator,
     cd_config: CDConfig,
     rng: &mut impl Rng,
+    stopped: &impl Fn() -> bool,
 ) -> (DTransformation, SampleEval) {
     let n_evals_init = evaluator.n_evals();
     let init_pos = init_dt;
@@ -43,7 +44,7 @@ pub fn refine_coord_desc(
     };
 
     // From the CD state, ask for candidate positions to evaluate. If none provided, stop.
-    while let Some(c) = cd.ask() {
+    while !stopped() && let Some(c) = cd.ask() {
         // Evaluate the candidates using the evaluator.
         let c_eval = c.map(|c| evaluator.evaluate_sample(c, Some(cd.eval)));
         
@@ -176,5 +177,30 @@ impl CDAxis {
             4..6 => CDAxis::Wiggle,
             _ => unreachable!(),
         }
+    }
+}
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+    struct CountingEvaluator(Rc<Cell<usize>>);
+    impl SampleEvaluator for CountingEvaluator {
+        fn evaluate_sample(&mut self, _: DTransformation, _: Option<SampleEval>) -> SampleEval {
+            self.0.set(self.0.get() + 1);
+            SampleEval::Clear { loss: 0.0 }
+        }
+        fn n_evals(&self) -> usize { self.0.get() }
+    }
+    #[test]
+    fn refinement_checks_stop_between_candidate_batches() {
+        let count = Rc::new(Cell::new(0));
+        let mut evaluator = CountingEvaluator(count.clone());
+        let mut rng = rand::rng();
+        let config = CDConfig { t_step_init: 1.0, t_step_limit: 0.001, r_step_init: 0.1, r_step_limit: 0.001, wiggle: true };
+        refine_coord_desc_with_stop(
+            (DTransformation::new(0.0, (0.0,0.0)), SampleEval::Clear { loss: 0.0 }),
+            &mut evaluator, config, &mut rng, &|| count.get() >= 2,
+        );
+        assert_eq!(count.get(), 2);
     }
 }

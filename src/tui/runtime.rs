@@ -241,6 +241,18 @@ impl TuiTerminator {
 }
 
 impl Terminator for TuiTerminator {
+    fn run_stopped(&self) -> bool {
+        self.signals.quit.load(Ordering::Relaxed)
+    }
+
+    fn stop_signal(&self) -> Option<sparrow::util::terminator::StopSignal> {
+        let signals = self.signals.clone();
+        let timeout = self.timeout;
+        Some(Arc::new(move || signals.quit.load(Ordering::Relaxed)
+            || signals.interrupt_phase.load(Ordering::Relaxed)
+            || timeout.is_some_and(|t| CdeInstant::now() >= t)))
+    }
+
     fn kill(&self) -> bool {
         self.signals.quit.load(Ordering::Relaxed)
             || self.signals.interrupt_phase.load(Ordering::Relaxed)

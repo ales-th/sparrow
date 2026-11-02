@@ -52,7 +52,12 @@ impl LBFBuilder {
     /// Builds a complete initial placement.
     ///
     /// Returns an error if strip growth reaches the heuristic limit.
-    pub fn construct(mut self) -> anyhow::Result<Self> {
+    pub fn construct(self) -> anyhow::Result<Self> {
+        self.construct_with(&crate::util::terminator::BasicTerminator::new(), &mut crate::util::listener::DummySolListener)
+            .map(|builder| builder.expect("uninterrupted construction"))
+    }
+
+    pub(crate) fn construct_with(mut self, terminator: &impl crate::util::terminator::Terminator, listener: &mut impl crate::util::listener::SolutionListener) -> anyhow::Result<Option<Self>> {
         let start = Instant::now();
         let n_items = self.instance.items.len();
         let sorted_item_indices = (0..n_items)
@@ -70,23 +75,30 @@ impl LBFBuilder {
 
         debug!("[CONSTR] placing items in order: {:?}",sorted_item_indices);
 
+        listener.report_initialization(0, self.instance.total_item_qty());
         for item_idx in sorted_item_indices {
-            self.place_item(item_idx)?;
+            if terminator.run_stopped() || !self.place_item_with_stop(item_idx, &|| terminator.run_stopped())? {
+                return Ok(None);
+            }
+            listener.report_initialization(self.prob.layout().placed_items().len(), self.instance.total_item_qty());
         }
 
+        listener.report_initial_solution(&self.prob.save());
         self.prob.fit_strip()?;
         debug!("[CONSTR] placed all items in width: {:.3} (in {:?})",self.prob.strip_width(), start.elapsed());
-        Ok(self)
+        Ok(Some(self))
     }
 
-    fn place_item(&mut self, item_idx: usize) -> anyhow::Result<()> {
+    fn place_item_with_stop(&mut self, item_idx: usize, stopped: &impl Fn() -> bool) -> anyhow::Result<bool> {
         loop {
-            if let Some(placement) = self.find_placement(item_idx) {
+            if stopped() { return Ok(false); }
+            if let Some(placement) = self.find_placement(item_idx, stopped) {
                 self.prob.place_item(placement);
                 debug!("[CONSTR] placing item {}/{} with idx {} at [{}]", self.prob.layout().placed_items().len(), self.instance.total_item_qty(), placement.item_idx, placement.d_transf);
-                return Ok(());
+                return Ok(true);
             }
 
+            if stopped() { return Ok(false); }
             let next_width = self.prob.strip_width() * 1.2;
             // Retain the existing heuristic ceiling, without treating it as infeasibility.
             let width_limit = 2.0 * self.instance.items.iter()
@@ -101,12 +113,12 @@ impl LBFBuilder {
         }
     }
 
-    fn find_placement(&mut self, item_idx: usize) -> Option<SPPlacement> {
+    fn find_placement(&mut self, item_idx: usize, stopped: &impl Fn() -> bool) -> Option<SPPlacement> {
         let layout = self.prob.layout();
         let item = self.instance.item(item_idx);
         let evaluator = LBFEvaluator::new(layout, item);
 
-        let (best_sample, _) = search_placement(layout, item, None, evaluator, self.sample_config, &mut self.rng);
+        let (best_sample, _) = crate::sample::search::search_placement_with_stop(layout, item, None, evaluator, self.sample_config, &mut self.rng, stopped);
 
         match best_sample {
             Some((d_transf, SampleEval::Clear { .. })) => {

@@ -2,6 +2,14 @@ use jagua_rs::probs::spp::entities::SPSolution;
 
 /// Trait for listeners that can receive solutions during the optimization process
 pub trait SolutionListener {
+    /// Disable candidate snapshots when only feasible solutions are needed.
+    fn wants_candidates(&self) -> bool { true }
+
+    fn report_initialization(&mut self, _placed: usize, _required: usize) {}
+
+    /// A complete valid solution during setup, before phase-level reporting starts.
+    fn report_initial_solution(&mut self, _solution: &SPSolution) {}
+
     fn report(&mut self, report: ReportType, solution: &SPSolution);
 
     fn report_phase(&mut self, _phase: OptimizationPhase) {}

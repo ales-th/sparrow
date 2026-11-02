@@ -1,3 +1,10 @@
+//! # Sparrow embedding fork
+//!
+//! Use [`solve`] with [`SolveProblem`], [`SolveSettings`], and a fresh [`SolveControl`].
+//! Always inspect [`SolveOutcome::status`] and [`SolveOutcome::best_solution`] independently.
+//! The complete application integration guide, including coordinate conversion, budgets,
+//! progress ownership, cancellation, and warm starts, is available in [`solver`].
+//! Lower-level optimizer and IO modules remain for compatibility and maintainer tooling.
 #![cfg_attr(feature = "simd", feature(portable_simd))]
 #![allow(const_item_mutation)]
 #![allow(unused_imports)]
@@ -13,6 +20,12 @@ pub mod util;
 pub mod config;
 pub mod eval;
 pub mod consts;
+pub mod solver;
+
+pub use jagua_rs;
+pub use config::SparrowConfig;
+pub use solver::{solve, BudgetMode, CompletionReason, ProgressEvent, SolveControl, SolveError,
+    SolveOutcome, SolvePhase, SolveProblem, SolveSettings, SolveStatistics, SolveStatus};
 
 pub static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
@@ -37,3 +50,8 @@ pub const EXPORT_ONLY_FINAL_SVG: bool = false;
 
 #[cfg(all(feature = "live_svg", feature = "only_final_svg"))]
 compile_error!("The features `live_svg` and `only_final_svg` are mutually exclusive.");
+
+// Compile README examples without copying repository-relative navigation into generated docs.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+mod readme_examples {}
