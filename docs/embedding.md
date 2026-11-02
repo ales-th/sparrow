@@ -129,7 +129,7 @@ late result is applied to the shapes that produced it, rather than newer edits.
 
 | Setting | Meaning and default |
 | --- | --- |
-| `budget` | Defaults to `WholeRun(600 seconds)`. Includes initialization. |
+| `budget` | Defaults to `WholeRun(600 seconds)`. Includes initialization. `WholeRunWithPhaseLimits` also enforces the configured exploration and compression caps while retaining one overall deadline. |
 | `config.expl_cfg.time_limit`, `config.cmpr_cfg.time_limit` | Used only by `SearchOnly`; ignored as phase allocations in `WholeRun`. |
 | `seed` | Optional full `u64`; overrides `config.rng_seed`. Otherwise the legacy seed or a generated seed is used. |
 | `config.*.separator_config.n_workers` | Separate worker count for each phase; both default to 3. This is not the number of application jobs. |
@@ -148,7 +148,8 @@ In `WholeRun`, time starts at API entry and includes validation, import, initial
 placement, callbacks, and search. Exploration receives 80% of the time remaining
 after initialization. Compression receives the entire remaining global budget
 when it begins, including unused exploration time. Expiring exploration's
-allocation alone does not exhaust the whole-run budget.
+allocation alone does not exhaust the whole-run budget. `WholeRunWithPhaseLimits` uses
+that same global deadline while also capping each phase at its configured duration.
 
 `SearchOnly` gives exploration and compression their configured independent
 limits, excluding initialization. Its exhaustion reason means at least one phase

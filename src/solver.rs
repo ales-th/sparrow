@@ -41,6 +41,8 @@ pub enum SolveProblem<'a> {
 pub enum BudgetMode {
     /// Includes import, construction, callbacks, and search. Checked cooperatively.
     WholeRun(Duration),
+    /// Enforces a whole-run deadline and the configured exploration/compression phase limits.
+    WholeRunWithPhaseLimits(Duration),
     /// Uses the configuration's separate exploration and compression durations.
     SearchOnly,
 }
@@ -320,7 +322,7 @@ impl SolveSettings {
         for duration in [c.expl_cfg.time_limit, c.cmpr_cfg.time_limit]
             .into_iter()
             .chain(match self.budget {
-                BudgetMode::WholeRun(d) => Some(d),
+                BudgetMode::WholeRun(d) | BudgetMode::WholeRunWithPhaseLimits(d) => Some(d),
                 BudgetMode::SearchOnly => None,
             })
         {
@@ -619,6 +621,7 @@ struct RunTerminator {
     deadline: Option<Instant>,
     phase_deadline: Option<Instant>,
     whole_run: bool,
+    phase_limits: bool,
     phase_count: usize,
     timed_out: Arc<AtomicBool>,
 }
@@ -627,11 +630,17 @@ impl RunTerminator {
         Self {
             control,
             deadline: match budget {
-                BudgetMode::WholeRun(d) => start.checked_add(d),
+                BudgetMode::WholeRun(d) | BudgetMode::WholeRunWithPhaseLimits(d) => {
+                    start.checked_add(d)
+                }
                 BudgetMode::SearchOnly => None,
             },
             phase_deadline: None,
-            whole_run: matches!(budget, BudgetMode::WholeRun(_)),
+            whole_run: matches!(
+                budget,
+                BudgetMode::WholeRun(_) | BudgetMode::WholeRunWithPhaseLimits(_)
+            ),
+            phase_limits: matches!(budget, BudgetMode::WholeRunWithPhaseLimits(_)),
             phase_count: 0,
             timed_out: Arc::new(AtomicBool::new(false)),
         }
@@ -639,6 +648,7 @@ impl RunTerminator {
     fn exhausted(&self) -> bool {
         if self.whole_run {
             self.deadline.is_some_and(|d| Instant::now() >= d)
+                || (self.phase_limits && self.timed_out.load(Ordering::Relaxed))
         } else {
             self.timed_out.load(Ordering::Relaxed)
         }
@@ -647,9 +657,14 @@ impl RunTerminator {
 impl Terminator for RunTerminator {
     fn phase_time_limit(&self, configured: Duration) -> Duration {
         if self.whole_run {
-            self.phase_deadline.map_or(Duration::ZERO, |d| {
+            let remaining = self.phase_deadline.map_or(Duration::ZERO, |d| {
                 d.saturating_duration_since(Instant::now())
-            })
+            });
+            if self.phase_limits {
+                remaining.min(configured)
+            } else {
+                remaining
+            }
         } else {
             configured
         }
@@ -675,14 +690,24 @@ impl Terminator for RunTerminator {
         let duration = if self.whole_run {
             let remaining = remaining.unwrap_or(Duration::ZERO);
             if self.phase_count > 0 {
-                remaining
+                if self.phase_limits {
+                    remaining.min(timeout)
+                } else {
+                    remaining
+                }
+            } else if self.phase_limits {
+                remaining.min(timeout)
             } else {
                 remaining.mul_f32(crate::consts::DEFAULT_EXPLORE_TIME_RATIO)
             }
         } else {
             timeout
         };
-        self.phase_deadline = Some(now.checked_add(duration).unwrap_or(now));
+        let phase_deadline = now.checked_add(duration).unwrap_or(now);
+        self.phase_deadline = Some(match (self.deadline, self.phase_limits) {
+            (Some(global), true) => phase_deadline.min(global),
+            _ => phase_deadline,
+        });
         self.phase_count += 1;
         if self.phase_count == 2 {
             self.control.skip.store(false, Ordering::Relaxed);
