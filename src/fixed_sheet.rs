@@ -35,9 +35,15 @@ pub struct SheetSearch {
 }
 
 pub enum SheetOutcome {
-    Complete(ExtLayout),
+    Complete(SheetFit),
     NoCompleteFit,
-    Cancelled,
+    Cancelled(Option<SheetFit>),
+}
+
+pub struct SheetFit {
+    pub layout: ExtLayout,
+    /// Rightmost occupied coordinate, including the half-clearance on parts.
+    pub used_length: f32,
 }
 
 pub struct PreparedSheet {
@@ -167,7 +173,7 @@ impl PreparedSheet {
     }
 
     /// The lock prefix is preserved verbatim in every result.
-    pub fn validate(&self, solution: &ExtLayout) -> Result<f32> {
+    pub fn validate(&self, solution: &ExtLayout) -> Result<(f32, f32)> {
         ensure!(
             solution.container_id == 0 && solution.placed_items.len() >= self.locks.len(),
             "Invalid sheet layout"
@@ -202,8 +208,17 @@ impl PreparedSheet {
             layout.is_collision_free(),
             "Layout violates sheet boundaries or clearances"
         );
-        Ok((f64::from(layout.placed_item_area()) / self.stock_area) as f32)
+        let density = (f64::from(layout.placed_item_area()) / self.stock_area) as f32;
+        Ok((density, used_length(&layout)))
     }
+}
+
+fn used_length(layout: &Layout) -> f32 {
+    layout
+        .placed_items()
+        .values()
+        .map(|part| part.shape().bbox().x_max)
+        .fold(0.0, f32::max)
 }
 
 pub fn solve_fixed_sheet(
@@ -211,7 +226,7 @@ pub fn solve_fixed_sheet(
     sheet: FixedSheet<'_>,
     settings: SheetSearch,
     control: &SolveControl,
-    mut progress: impl FnMut(usize, usize, usize, Duration),
+    mut progress: impl FnMut(usize, usize, usize, Duration, Option<&SheetFit>),
 ) -> Result<SheetOutcome> {
     let start = jagua_rs::Instant::now();
     ensure!(
@@ -224,15 +239,17 @@ pub fn solve_fixed_sheet(
                 .time_limit
                 .is_some_and(|limit| start.elapsed() >= limit)
     };
-    let stop_outcome = || {
+    let stop_outcome = |best| {
         if control.is_cancelled() {
-            SheetOutcome::Cancelled
+            SheetOutcome::Cancelled(best)
+        } else if let Some(fit) = best {
+            SheetOutcome::Complete(fit)
         } else {
             SheetOutcome::NoCompleteFit
         }
     };
     if stopped() {
-        return Ok(stop_outcome());
+        return Ok(stop_outcome(None));
     }
     let prepared = PreparedSheet::new(problem, sheet, settings.config)?;
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(settings.seed);
@@ -249,6 +266,7 @@ pub fn solve_fixed_sheet(
     let required = order.len() + prepared.locks.len();
     let mut best_count = prepared.locks.len();
     let mut attempts = 0;
+    let mut best: Option<SheetFit> = None;
     while !stopped() && settings.attempt_limit.is_none_or(|limit| attempts < limit) {
         if attempts > 0 {
             order.shuffle(&mut rng);
@@ -256,10 +274,10 @@ pub fn solve_fixed_sheet(
         attempts += 1;
         let mut layout = prepared.initial.clone();
         let mut placed = prepared.locks.len();
-        progress(attempts, best_count, required, start.elapsed());
+        progress(attempts, best_count, required, start.elapsed(), None);
         for &idx in &order {
             if stopped() {
-                return Ok(stop_outcome());
+                return Ok(stop_outcome(best));
             }
             let item = &prepared.items[idx];
             let evaluator = LBFEvaluator::new(&layout, item);
@@ -279,22 +297,41 @@ pub fn solve_fixed_sheet(
             placed += 1;
             if placed > best_count {
                 best_count = placed;
-                progress(attempts, best_count, required, start.elapsed());
+                progress(attempts, best_count, required, start.elapsed(), None);
             }
         }
-        if placed == required && !stopped() {
+        if placed == required
+            && !stopped()
+            && best
+                .as_ref()
+                .is_none_or(|fit| used_length(&layout) < fit.used_length)
+        {
             let mut result = export_layout_snapshot(&layout.save(), 0);
             result.placed_items[..prepared.locks.len()].clone_from_slice(&prepared.locks);
-            let Ok(density) = prepared.validate(&result) else {
+            let Ok((density, used_length)) = prepared.validate(&result) else {
                 continue;
             };
             result.density = density;
-            return Ok(if control.is_cancelled() {
-                SheetOutcome::Cancelled
-            } else {
-                SheetOutcome::Complete(result)
-            });
+            if best
+                .as_ref()
+                .is_none_or(|fit| used_length < fit.used_length)
+            {
+                best = Some(SheetFit {
+                    layout: result,
+                    used_length,
+                });
+                progress(
+                    attempts,
+                    best_count,
+                    required,
+                    start.elapsed(),
+                    best.as_ref(),
+                );
+            }
+            if order.is_empty() {
+                break;
+            }
         }
     }
-    Ok(stop_outcome())
+    Ok(stop_outcome(best))
 }
