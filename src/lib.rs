@@ -16,6 +16,7 @@ use std::sync::LazyLock;
 pub mod config;
 pub mod consts;
 pub mod eval;
+pub mod fixed_sheet;
 pub mod optimizer;
 pub mod quantify;
 pub mod sample;
